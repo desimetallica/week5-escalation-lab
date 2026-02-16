@@ -1,5 +1,5 @@
 # week5-escalation-lab
-Demonstrate the MITRE ATT&CK T1648 Serverless Execution detection. A complete laboratory.
+Detect the MITRE ATT&CK T1648 Serverless Execution detection. A complete laboratory.
 
 ## Objective
 Analyze and deeply understand how privilege escalation via AWS Lambda and iam:PassRole manifests in raw CloudTrail logs — without relying on SIEM, EDR, or automated detections.
