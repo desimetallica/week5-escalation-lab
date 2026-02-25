@@ -75,13 +75,15 @@ A developer can:
 The privilege escalation occurs because: Lambda assumes AdminRole, and Lambda executes attacker-controlled code.
 
 The identity transition becomes:
-```Developer IAM User
+```
+Developer IAM User
         ↓
 Lambda Invocation
         ↓
 AssumedRole: AdminRole
         ↓
-AdministratorAccess permissions```
+AdministratorAccess permissions
+```
 
 The developer never directly assumes the role — the service does, this is the detection challenge.
 
@@ -189,7 +191,7 @@ This gives you:
 - Under what session name
 - By Lambda
 
-This is the **pivot detection baseline**.
+This is the **pivot detection baseline**. From this point 
 
 ### 4. Considerations on real case Lambda-Based Privilege Escalation
 
