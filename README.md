@@ -125,6 +125,95 @@ Serverless computing execution abuse phase:
 
 ## Detection Logic
 
+The detection goal is to reconstruct the escalation using raw CloudTrail events. The escalation chain typically appears in CloudTrail as:
+
+1. PassRole
+2. CreateFunction
+3. InvokeFunction
+4. Administrative API calls under AssumedRole
+
+Even without correlation tooling, a timeline-based analysis reveals:
+
+- Delegation
+- Service-mediated role assumption
+- Privilege boundary crossing
+
+This sequence is the detection anchor. The detection goal is to reconstruct the escalation using raw CloudTrail events. 
+
+### 1. Detect Role Delegation
+
+In AWS, `iam:PassRole` does not generate a separate CloudTrail event. When a developer creates or updates a Lambda function with a role they are allowed to pass, the PassRole permission is only checked internally by AWS. CloudTrail logs the Lambda API call (`CreateFunction` or `UpdateFunctionConfiguration`) but not the PassRole action itself.
+
+From a blue-team perspective, this means detection must focus on Lambda creation or update events where the execution role is a sensitive role, such as `AdminRole`.
+
+``` bash
+jq '.Records[] |
+    select(.eventName? // "" | test("Update|CreateFunction")) |
+    {
+        time: .eventTime,
+        user: .userIdentity.arn,
+        lambda: .requestParameters.functionName,
+        role: .requestParameters.role,
+        source_ip: .sourceIPAddress,
+        event_id: .eventID
+    }' *.json
+
+{
+  "time": "2026-02-18T15:06:53Z",
+  "user": "arn:aws:iam::137809406849:user/bob",
+  "lambda": "privilege-escalation",
+  "role": "arn:aws:iam::137809406849:role/AdminRole",
+  "source_ip": "93.51.116.45",
+  "event_id": "a9665076-a3da-45b3-961f-47d682c5f5ed"
+}
+```
+### 3. Detect Lambda-Initiated Assume Role Events Pivot
+This detects when Lambda assumes *any* role: 
+
+``` json
+jq '.Records[] |
+    select(.eventSource == "sts.amazonaws.com") |
+    select(.eventName == "AssumeRole") |
+    select(.userIdentity.invokedBy? == "lambda.amazonaws.com") |
+    {
+        time: .eventTime,
+        role_arn: .requestParameters.roleArn,
+        session_name: .requestParameters.roleSessionName,
+        account: .recipientAccountId
+    }' *.json
+```
+
+This gives you:
+- When the role was assumed
+- Which role
+- Under what session name
+- By Lambda
+
+This is the **pivot detection baseline**.
+
+### 4. Considerations on real case Lambda-Based Privilege Escalation
+
+While explicit IAM modifications such as `AttachUserPolicy` with `AdministratorAccess` are easy to detect, a realistic attacker will often avoid noisy privilege-escalation patterns. Instead, they may leverage a Lambda function configured with an already-privileged execution role and perform sensitive actions without modifying IAM at all.
+
+A stealthier real case scenario approach may include:
+
+- Using the assumed role to access sensitive resources (S3, Secrets Manager, EC2) without changing IAM policies.
+- Creating minimal inline policies instead of attaching well-known managed policies.
+- Generating access keys for existing privileged users.
+- Modifying role trust policies instead of attaching policies.
+- Embedding malicious logic inside legitimate automation Lambda functions.
+- Executing once and deleting the function immediately after use.
+
+In these cases, no obvious `AttachUserPolicy` or `PutUserPolicy` event may appear. The only consistent pivot point is the `AssumeRole` event initiated by the Lambda service **AND** the role has high privilege.
+
+A more reliable detection focus therefor on:
+
+- Monitoring AssumeRole events where invokedBy is lambda.amazonaws.com.
+- Correlating assumed-role sessions with high-privilege roles.
+- Detecting any IAM API calls originating from credentials issued to a Lambda function.
+- Alerting on modifications to CloudTrail, CloudWatch Logs, or log retention settings.
+- Investigating Lambda functions that assume privileged roles but perform minimal visible actions.
+
 ## Why This Matters
 
 ## Lessons Learned
