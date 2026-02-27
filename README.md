@@ -125,6 +125,8 @@ Serverless computing execution abuse phase:
     aws --profile bob lambda invoke --function-name privilege-escalation out.json
     ```
 
+After executing the escalation scenario, the next phase focuses on reconstructing the attack strictly from CloudTrail logs.
+
 ## Detection Logic
 
 The detection goal is to reconstruct the escalation using raw CloudTrail events. The escalation chain typically appears in CloudTrail as:
@@ -140,7 +142,7 @@ Even without correlation tooling, a timeline-based analysis reveals:
 - Service-mediated role assumption
 - Privilege boundary crossing
 
-This sequence is the detection anchor. The detection goal is to reconstruct the escalation using raw CloudTrail events. 
+This sequence is the detection anchor.
 
 ### 1. Detect Role Delegation
 
@@ -169,10 +171,10 @@ jq '.Records[] |
   "event_id": "a9665076-a3da-45b3-961f-47d682c5f5ed"
 }
 ```
-### 3. Detect Lambda-Initiated Assume Role Events Pivot
+### 2. Detect Lambda-Initiated Assume Role Events Pivot
 This detects when Lambda assumes *any* role: 
 
-``` json
+``` bash
 jq '.Records[] |
     select(.eventSource == "sts.amazonaws.com") |
     select(.eventName == "AssumeRole") |
@@ -191,9 +193,67 @@ This gives you:
 - Under what session name
 - By Lambda
 
-This is the **pivot detection baseline**. From this point 
+This is the **pivot detection baseline**. You can refine the research to detect *Admin* only roles:
 
-### 4. Considerations on real case Lambda-Based Privilege Escalation
+``` bash
+jq '.Records[] |
+    select(.eventSource == "sts.amazonaws.com") |
+    select(.eventName == "AssumeRole") |
+    select(.userIdentity.invokedBy? == "lambda.amazonaws.com") |
+    select(.requestParameters.roleArn | test("Admin|Administrator|Power")) |
+    {
+        time: .eventTime,
+        role: .requestParameters.roleArn,
+        session: .requestParameters.roleSessionName
+    }' *.json
+```
+
+### 3. Correlate Pivot to Subsequent Activity
+Once a Lambda function assumes a privileged role, you can use the `assumedRoleUser` ARN to trace all subsequent actions it performs.  
+Note Region-awareness in CloudTrail:
+
+- IAM management events -> **us-east-1**
+- Lambda Execution -> in this example **eu-south-1**
+
+Checking on us-east-1:
+``` bash
+jq --arg role "arn:aws:sts::137809406849:assumed-role/AdminRole/privilege-escalation" '
+.Records[] |
+    select(.userIdentity.arn? == $role) |
+    {
+        time: .eventTime,
+        service: .eventSource,
+        action: .eventName
+    }' *.json
+
+{
+  "time": "2026-02-24T15:28:32Z",
+  "service": "iam.amazonaws.com",
+  "action": "AttachUserPolicy"
+}
+```
+Here, we can clearly see the Lambda executed an IAM action: **AttachUserPolicy**.\
+Inspecting region-specific service activity (eu-south-1):
+
+``` bash
+jq --arg role "arn:aws:sts::137809406849:assumed-role/AdminRole/privilege-escalation" '
+.Records[] |
+    select(.userIdentity.arn? == $role) |
+    {
+        time: .eventTime,
+        service: .eventSource,
+        action: .eventName
+    }' *.json
+{
+  "time": "2026-02-24T15:28:33Z",
+  "service": "logs.amazonaws.com",
+  "action": "CreateLogStream"
+}
+```
+
+This shows the Lambda’s activity outside IAM, such as creating log streams in CloudWatch.  Correlating events across regions allows full reconstruction of the privilege escalation workflow.
+
+### 4. Real case Lambda-Based Privilege Escalation
 
 While explicit IAM modifications such as `AttachUserPolicy` with `AdministratorAccess` are easy to detect, a realistic attacker will often avoid noisy privilege-escalation patterns. Instead, they may leverage a Lambda function configured with an already-privileged execution role and perform sensitive actions without modifying IAM at all.
 
@@ -216,6 +276,12 @@ A more reliable detection focus therefor on:
 - Alerting on modifications to CloudTrail, CloudWatch Logs, or log retention settings.
 - Investigating Lambda functions that assume privileged roles but perform minimal visible actions.
 
-## Why This Matters
+An example of what could be generalized on IAM event detection is to check every event triggered by a lambda that i`Attach|Put|Create|Add|Update` in our searching, in order to check every event triggered by a Lambda that 
 
 ## Lessons Learned
+
+- Privilege escalation through AWS services often occurs indirectly via role assumption.
+- Monitoring only AttachUserPolicy or similar IAM actions is insufficient.
+- Service-initiated `AssumeRole` events represent a high-fidelity detection pivot for serverless privilege escalation.
+- Correlating assumed-role ARNs with subsequent activity across regions is essential for full visibility.
+- Detection engineering should prioritize identifying high-privilege role usage by compute services, not just policy changes.
